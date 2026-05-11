@@ -6,9 +6,6 @@
 //! Reads config, enumerates tables, requires `--yes` to confirm, drops both databases.
 
 use clap::Args;
-use extenddb_storage::bootstrapper::{BootstrapConfig, Bootstrapper};
-use extenddb_storage_postgres::PostgresBootstrapper;
-use extenddb_storage_postgres::parse_connection_string;
 
 use crate::config;
 
@@ -41,34 +38,28 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
         );
     }
     let app_config = config::load(&args.config)?;
-    let parts = parse_connection_string(&app_config.storage.postgres.connection_string)?;
+    let backend = &app_config.storage._backend;
 
-    // Defense-in-depth: validate identifiers used in format!-based DDL.
-    config::validate_pg_identifier(&parts.database, "catalog database name")?;
-    config::validate_pg_identifier(&args.pg_user, "--pg-user")?;
+    // Collect CLI args for backend-specific parsing
+    let cli_args: Vec<String> = std::env::args().collect();
 
     println!("=== extenddb destroy ===");
     println!("Config:           {}", args.config);
-    println!("Catalog database: {}", parts.database);
-    println!("PostgreSQL:       {}:{}", parts.host, parts.port);
     println!();
 
     // Create bootstrap store for catalog queries and database teardown.
-    let bootstrap = PostgresBootstrapper::connect(BootstrapConfig {
-        host: parts.host.clone(),
-        port: parts.port,
-        admin_user: args.pg_user.clone(),
-        admin_password: args.pg_pass.clone(),
-        app_user: parts.user.clone(),
-        app_password: parts.password.clone(),
-        catalog_db: parts.database.clone(),
-        data_db: String::new(), // Not known yet; will be read from catalog.
-    })
-    .await;
+    let bootstrap =
+        extenddb_storage::bootstrapper::create_bootstrapper(backend, &args.config, &cli_args).await;
 
     let mut data_db = String::new();
 
     if let Ok(ref bs) = bootstrap {
+        let catalog_db = bs.catalog_database_name();
+        let endpoint = bs.endpoint_info();
+        println!("Catalog database: {catalog_db}");
+        println!("{backend}:         {endpoint}");
+        println!();
+
         println!("--- Tables in catalog:");
         let tables = bs.list_table_names().await.unwrap_or_default();
         if tables.is_empty() {
@@ -105,24 +96,15 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
     // connects to the `postgres` database, so we can reuse it.
     if !data_db.is_empty() {
         // Defense-in-depth: validate even though this came from the catalog.
-        config::validate_pg_identifier(&data_db, "data database name")?;
+        config::validate_identifier(backend, &data_db, "data database name")?;
     }
 
     // Reconnect as admin for DDL operations (the catalog pool must be dropped
     // before we can DROP DATABASE).
     drop(bootstrap);
-    let bs = PostgresBootstrapper::connect(BootstrapConfig {
-        host: parts.host,
-        port: parts.port,
-        admin_user: args.pg_user,
-        admin_password: args.pg_pass,
-        app_user: parts.user,
-        app_password: parts.password,
-        catalog_db: parts.database,
-        data_db: data_db.clone(),
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Cannot connect as admin: {e:?}"))?;
+    let bs = extenddb_storage::bootstrapper::create_bootstrapper(backend, &args.config, &cli_args)
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot connect as admin: {e:?}"))?;
 
     bs.drop_databases(&data_db)
         .await

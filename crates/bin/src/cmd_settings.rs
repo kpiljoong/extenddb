@@ -8,10 +8,8 @@
 //! and `ops::READONLY_KEYS`.
 
 use clap::{Args, Subcommand};
-use sqlx::PgPool;
 
 use extenddb_storage::management_store::SettingsStore;
-use extenddb_storage_postgres::PostgresCatalogStore;
 
 use crate::config;
 
@@ -48,21 +46,26 @@ pub async fn run(args: SettingsArgs) -> anyhow::Result<()> {
         );
     }
     let app_config = config::load(&args.config)?;
-    let pool = PgPool::connect(&app_config.storage.postgres.connection_string).await?;
-    let store = PostgresCatalogStore::new(pool);
+    let backend = &app_config.storage._backend;
+    let store = extenddb_storage::settings_store::create_settings_store(
+        backend,
+        app_config.storage.connection_config(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create settings store: {}", e))?;
 
     match args.action {
-        SettingsAction::List => list(&store).await,
-        SettingsAction::Get { key } => get(&store, &key).await,
-        SettingsAction::Set { key, value } => set(&store, &key, &value).await,
+        SettingsAction::List => list(store.as_ref()).await,
+        SettingsAction::Get { key } => get(store.as_ref(), &key).await,
+        SettingsAction::Set { key, value } => set(store.as_ref(), &key, &value).await,
     }
 }
 
-async fn list(store: &PostgresCatalogStore) -> anyhow::Result<()> {
+async fn list(store: &dyn SettingsStore) -> anyhow::Result<()> {
     let rows = store
         .list_settings()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to list settings: {e:?}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to list settings: {:?}", e))?;
 
     if rows.is_empty() {
         println!("No settings found.");
@@ -74,11 +77,11 @@ async fn list(store: &PostgresCatalogStore) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn get(store: &PostgresCatalogStore, key: &str) -> anyhow::Result<()> {
+async fn get(store: &dyn SettingsStore, key: &str) -> anyhow::Result<()> {
     let value = store
         .get_setting(key)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to get setting: {e:?}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get setting: {:?}", e))?;
 
     if let Some(v) = value {
         println!("{v}");
@@ -89,7 +92,7 @@ async fn get(store: &PostgresCatalogStore, key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn set(store: &PostgresCatalogStore, key: &str, value: &str) -> anyhow::Result<()> {
+async fn set(store: &dyn SettingsStore, key: &str, value: &str) -> anyhow::Result<()> {
     if READONLY_KEYS.contains(&key) {
         anyhow::bail!("Setting '{key}' is read-only and cannot be changed via this command.");
     }
@@ -114,7 +117,7 @@ async fn set(store: &PostgresCatalogStore, key: &str, value: &str) -> anyhow::Re
     store
         .set_setting(key, value)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to set setting: {e:?}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to set setting: {:?}", e))?;
 
     tracing::warn!(
         target: "extenddb::audit::settings",

@@ -102,6 +102,12 @@ pub trait Bootstrapper: Send + Sync {
     /// Get the expected catalog version for this binary.
     fn expected_catalog_version(&self) -> String;
 
+    /// Return the catalog database name for display.
+    fn catalog_database_name(&self) -> String;
+
+    /// Return endpoint information (host:port or contact points) for display.
+    fn endpoint_info(&self) -> String;
+
     /// Return the catalog connection URL for config file generation.
     fn catalog_connection_url(&self) -> String;
 }

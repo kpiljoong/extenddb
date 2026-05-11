@@ -89,3 +89,23 @@ pub fn parse_connection_string(conn: &str) -> anyhow::Result<ConnParts> {
         database: database.to_owned(),
     })
 }
+
+// ── StorageConfig trait implementation ────────────────────────────────
+
+impl extenddb_storage::config::StorageConfig for PostgresStorageConfig {
+    fn connection_config(&self) -> &str {
+        &self.connection_string
+    }
+
+    fn max_connections(&self) -> u32 {
+        self.pool_size
+    }
+
+    fn max_catalog_connections(&self) -> u32 {
+        self.catalog_pool_size.unwrap_or(self.pool_size)
+    }
+
+    fn clone_box(&self) -> Box<dyn extenddb_storage::config::StorageConfig> {
+        Box::new(self.clone())
+    }
+}

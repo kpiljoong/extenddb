@@ -31,18 +31,20 @@ pub use types::{
 
 use std::future::Future;
 
+use futures::future::BoxFuture;
+
 // ── Settings store ─────────────────────────────────────────────────────
 
 /// Runtime settings storage (e.g. `control_plane_delay_seconds`, `log_level`).
 pub trait SettingsStore: Send + Sync {
     /// Get a single setting value. Returns `None` if the key does not exist.
-    fn get_setting(&self, key: &str) -> impl Future<Output = OpResult<Option<String>>> + Send;
+    fn get_setting(&self, key: &str) -> BoxFuture<'_, OpResult<Option<String>>>;
 
     /// Set a setting value (upsert).
-    fn set_setting(&self, key: &str, value: &str) -> impl Future<Output = OpResult<()>> + Send;
+    fn set_setting(&self, key: &str, value: &str) -> BoxFuture<'_, OpResult<()>>;
 
     /// List all settings as `(key, value)` pairs, ordered by key.
-    fn list_settings(&self) -> impl Future<Output = OpResult<Vec<(String, String)>>> + Send;
+    fn list_settings(&self) -> BoxFuture<'_, OpResult<Vec<(String, String)>>>;
 
     /// P119: Get the cached encryption key if available. Returns `None` by
     /// default; backends that cache the key at startup override this.

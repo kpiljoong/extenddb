@@ -56,46 +56,129 @@ impl PostgresCatalogStore {
 // ── SettingsStore ──────────────────────────────────────────────────────
 
 impl extenddb_storage::management_store::SettingsStore for PostgresCatalogStore {
-    async fn get_setting(&self, key: &str) -> OpResult<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = $1")
-            .bind(key)
-            .fetch_optional(&self.pool)
+    fn get_setting(&self, key: &str) -> futures::future::BoxFuture<'_, OpResult<Option<String>>> {
+        let key = key.to_string();
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT value FROM settings WHERE key = $1")
+                    .bind(&key)
+                    .fetch_optional(&pool)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("get_setting: {e}");
+                        OpError::Internal("Database error".to_owned())
+                    })?;
+            Ok(row.map(|(v,)| v))
+        })
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> futures::future::BoxFuture<'_, OpResult<()>> {
+        let key = key.to_string();
+        let value = value.to_string();
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            sqlx::query(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) \
+                 ON CONFLICT (key) DO UPDATE SET value = $2",
+            )
+            .bind(&key)
+            .bind(&value)
+            .execute(&pool)
             .await
             .map_err(|e| {
-                tracing::error!("get_setting: {e}");
+                tracing::error!("set_setting: {e}");
                 OpError::Internal("Database error".to_owned())
             })?;
-        Ok(row.map(|(v,)| v))
+            Ok(())
+        })
     }
 
-    async fn set_setting(&self, key: &str, value: &str) -> OpResult<()> {
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ($1, $2) \
-             ON CONFLICT (key) DO UPDATE SET value = $2",
-        )
-        .bind(key)
-        .bind(value)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("set_setting: {e}");
-            OpError::Internal("Database error".to_owned())
-        })?;
-        Ok(())
-    }
-
-    async fn list_settings(&self) -> OpResult<Vec<(String, String)>> {
-        sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("list_settings: {e}");
-                OpError::Internal("Database error".to_owned())
-            })
+    fn list_settings(&self) -> futures::future::BoxFuture<'_, OpResult<Vec<(String, String)>>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| {
+                    tracing::error!("list_settings: {e}");
+                    OpError::Internal("Database error".to_owned())
+                })
+        })
     }
 
     fn cached_encryption_key(&self) -> Option<String> {
         self.encryption_key.as_ref().map(|k| k.to_string())
+    }
+}
+
+// ── DiagnosticsStore ───────────────────────────────────────────────────
+
+impl extenddb_storage::diagnostics::DiagnosticsStore for PostgresCatalogStore {
+    fn count_tables(
+        &self,
+    ) -> futures::future::BoxFuture<'_, extenddb_storage::diagnostics::DiagResult<i64>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tables")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| extenddb_storage::diagnostics::DiagError::QueryFailed(e.to_string()))?;
+            Ok(count)
+        })
+    }
+
+    fn count_indexes(
+        &self,
+    ) -> futures::future::BoxFuture<'_, extenddb_storage::diagnostics::DiagResult<i64>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM indexes")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| extenddb_storage::diagnostics::DiagError::QueryFailed(e.to_string()))?;
+            Ok(count)
+        })
+    }
+
+    fn test_data_database_connection(
+        &self,
+    ) -> futures::future::BoxFuture<'_, extenddb_storage::diagnostics::DiagResult<String>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            // Get data database connection string and name from settings
+            let conn_row: Option<(String,)> = sqlx::query_as(
+                "SELECT value FROM settings WHERE key = 'data_database_connection_string'",
+            )
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| extenddb_storage::diagnostics::DiagError::QueryFailed(e.to_string()))?;
+
+            let name_row: Option<(String,)> =
+                sqlx::query_as("SELECT value FROM settings WHERE key = 'data_database_name'")
+                    .fetch_optional(&pool)
+                    .await
+                    .map_err(|e| {
+                        extenddb_storage::diagnostics::DiagError::QueryFailed(e.to_string())
+                    })?;
+
+            match (conn_row, name_row) {
+                (Some((conn,)), Some((name,))) => {
+                    // Test connection
+                    sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect(&conn)
+                        .await
+                        .map_err(|e| {
+                            extenddb_storage::diagnostics::DiagError::ConnectionFailed(e.to_string())
+                        })?;
+                    Ok(name)
+                }
+                _ => Err(extenddb_storage::diagnostics::DiagError::QueryFailed(
+                    "Data database not configured".to_string(),
+                )),
+            }
+        })
     }
 }
 

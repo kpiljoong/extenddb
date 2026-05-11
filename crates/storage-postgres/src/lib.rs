@@ -22,6 +22,7 @@ pub(crate) mod gsi_queue;
 mod management_store;
 mod metadata_engine;
 mod migrations;
+mod operations;
 mod pg_util;
 mod stream_engine;
 mod table_engine;
@@ -45,6 +46,58 @@ inventory::submit! {
                 Ok(Box::new(store) as Box<dyn extenddb_storage::bootstrapper::Bootstrapper>)
             })
         }
+    }
+}
+
+// Auto-register PostgreSQL operations engine
+inventory::submit! {
+    extenddb_storage::operations::OperationsEngineRegistration {
+        name: "postgres",
+        operations: &operations::PostgresOperationsEngine,
+    }
+}
+
+// Auto-register PostgreSQL config deserializer
+inventory::submit! {
+    extenddb_storage::config::StorageConfigRegistration {
+        backend: "postgres",
+        deserializer: |table| {
+            let config: PostgresStorageConfig = table.clone().try_into()
+                .map_err(|e: toml::de::Error| format!("Failed to parse postgres config: {}", e))?;
+            Ok(Box::new(config) as Box<dyn extenddb_storage::config::StorageConfig>)
+        },
+    }
+}
+
+// Auto-register PostgreSQL settings store factory
+inventory::submit! {
+    extenddb_storage::settings_store::SettingsStoreRegistration {
+        backend: "postgres",
+        factory: |connection_string| {
+            let connection_string = connection_string.to_string();
+            Box::pin(async move {
+                let pool = sqlx::PgPool::connect(&connection_string)
+                    .await
+                    .map_err(|e| extenddb_storage::settings_store::SettingsStoreError::ConnectionFailed(e.to_string()))?;
+                Ok(Box::new(PostgresCatalogStore::new(pool)) as Box<dyn extenddb_storage::management_store::SettingsStore>)
+            })
+        },
+    }
+}
+
+// Auto-register PostgreSQL diagnostics store factory
+inventory::submit! {
+    extenddb_storage::diagnostics_store::DiagnosticsStoreRegistration {
+        backend: "postgres",
+        factory: |connection_string| {
+            let connection_string = connection_string.to_string();
+            Box::pin(async move {
+                let pool = sqlx::PgPool::connect(&connection_string)
+                    .await
+                    .map_err(|e| extenddb_storage::diagnostics_store::DiagnosticsStoreError::ConnectionFailed(e.to_string()))?;
+                Ok(Box::new(PostgresCatalogStore::new(pool)) as Box<dyn extenddb_storage::diagnostics::DiagnosticsStore>)
+            })
+        },
     }
 }
 

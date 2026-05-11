@@ -412,6 +412,14 @@ impl Bootstrapper for PostgresBootstrapper {
         CATALOG_VERSION.to_string()
     }
 
+    fn catalog_database_name(&self) -> String {
+        self.config.catalog_db.clone()
+    }
+
+    fn endpoint_info(&self) -> String {
+        format!("{}:{}", self.config.host, self.config.port)
+    }
+
     fn catalog_connection_url(&self) -> String {
         self.app_connection_url(&self.config.catalog_db)
     }

@@ -65,7 +65,7 @@ pub async fn run(args: CatalogCheckArgs) -> anyhow::Result<()> {
     // Connect to catalog.
     let catalog_pool = PgPoolOptions::new()
         .max_connections(2)
-        .connect(&app_config.storage.postgres.connection_string)
+        .connect(app_config.storage.connection_config())
         .await
         .map_err(|e| anyhow::anyhow!("Cannot connect to catalog: {e}"))?;
     println!("Connected to catalog.");

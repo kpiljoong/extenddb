@@ -27,7 +27,6 @@ mod util;
 mod workers;
 
 use clap::{Parser, Subcommand};
-use extenddb_storage_postgres::CATALOG_VERSION;
 
 #[derive(Parser)]
 #[command(name = "extenddb", about = "ExtendDB — DynamoDB-compatible API server")]
@@ -107,7 +106,19 @@ fn main() -> anyhow::Result<()> {
 /// Print version, catalog version, git commit hash, and build timestamp.
 fn print_version() {
     println!("extenddb {}", env!("CARGO_PKG_VERSION"));
-    println!("catalog {CATALOG_VERSION}");
+
+    // Report catalog version(s) for all registered backend(s)
+    let backends = extenddb_storage::operations::list_operations_backends();
+    if backends.is_empty() {
+        println!("catalog unknown (no backends registered)");
+    } else {
+        for backend in backends {
+            let version = extenddb_storage::operations::catalog_version(backend)
+                .unwrap_or_else(|_| "unknown".to_string());
+            println!("catalog {} ({})", version, backend);
+        }
+    }
+
     println!("commit {}", env!("EXTENDDB_GIT_HASH"));
     println!("built {}", env!("EXTENDDB_BUILD_TIME"));
 }

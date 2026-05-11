@@ -6,9 +6,6 @@
 //! Reads current catalog version, runs pending migrations, and reports the result.
 
 use clap::Args;
-use extenddb_storage::bootstrapper::{BootstrapConfig, Bootstrapper};
-use extenddb_storage_postgres::PostgresBootstrapper;
-use extenddb_storage_postgres::parse_connection_string;
 
 use crate::config;
 
@@ -17,6 +14,14 @@ pub struct MigrateArgs {
     /// Path to configuration file
     #[arg(short, long, default_value = "extenddb.toml")]
     config: String,
+
+    /// PostgreSQL admin user (for catalog migrations)
+    #[arg(long)]
+    pg_user: Option<String>,
+
+    /// PostgreSQL admin password
+    #[arg(long)]
+    pg_pass: Option<String>,
 
     /// Confirm migration (required, no interactive prompt)
     #[arg(long)]
@@ -32,22 +37,20 @@ pub async fn run(args: MigrateArgs) -> anyhow::Result<()> {
         );
     }
     let app_config = config::load(&args.config)?;
-    let parts = parse_connection_string(&app_config.storage.postgres.connection_string)?;
+    let backend = &app_config.storage._backend;
 
     println!("=== extenddb migrate ===");
     println!("Config:           {}", args.config);
     println!();
 
-    let bootstrap = PostgresBootstrapper::new(BootstrapConfig {
-        host: parts.host,
-        port: parts.port,
-        admin_user: parts.user.clone(),
-        admin_password: Some(parts.password.clone()),
-        app_user: parts.user,
-        app_password: parts.password,
-        catalog_db: parts.database,
-        data_db: String::new(),
-    });
+    // Collect CLI args for backend-specific parsing
+    let cli_args: Vec<String> = std::env::args().collect();
+
+    // Create bootstrapper via registry
+    let bootstrap =
+        extenddb_storage::bootstrapper::create_bootstrapper(backend, &args.config, &cli_args)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
     // Show current version.
     println!("--- Checking current catalog version...");

@@ -126,6 +126,16 @@ pub async fn run(args: InitArgs) -> anyhow::Result<u8> {
 
     println!("=== extenddb init (backend: {backend}) ===");
 
+    // Check config file conflict early, before any database work
+    if Path::new(&args.config).exists() && !args.overwrite {
+        eprintln!(
+            "Error: Config file \"{}\" already exists. \
+             Use --overwrite to delete and regenerate it.",
+            args.config
+        );
+        return Ok(255);
+    }
+
     // Collect CLI args for backend-specific parsing
     let cli_args: Vec<String> = std::env::args().collect();
 
@@ -247,22 +257,11 @@ pub async fn run(args: InitArgs) -> anyhow::Result<u8> {
     // Generate or update extenddb.toml.
     let catalog_url = bootstrapper.catalog_connection_url();
     let config_path = &args.config;
-    let overwrite = args.overwrite;
 
     if Path::new(config_path).exists() {
-        if overwrite {
-            std::fs::remove_file(config_path)?;
-            generate_config(config_path, &catalog_url, &bind_addr, docs_dir.as_deref())?;
-        } else {
-            eprintln!(
-                "Error: Config file \"{config_path}\" already exists. \
-                 Use --overwrite to delete and regenerate it."
-            );
-            return Ok(255);
-        }
-    } else {
-        generate_config(config_path, &catalog_url, &bind_addr, docs_dir.as_deref())?;
+        std::fs::remove_file(config_path)?;
     }
+    generate_config(config_path, &catalog_url, &bind_addr, docs_dir.as_deref())?;
 
     println!(
         "\n=== extenddb init complete ===\nStart the server with: extenddb serve --config {}",

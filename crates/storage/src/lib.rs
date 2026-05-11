@@ -9,9 +9,14 @@
 
 pub mod authorization_store;
 pub mod bootstrapper;
+pub mod config;
+pub mod diagnostics;
+pub mod diagnostics_store;
 pub mod error;
-
+pub mod hooks;
 pub mod management_store;
+pub mod operations;
+pub mod settings_store;
 pub mod transact;
 
 pub use transact::{TransactGetOp, TransactWriteOp};
@@ -543,4 +548,49 @@ pub trait BackupEngine: Send + Sync {
         source_table_name: &str,
         target_table_name: &str,
     ) -> impl Future<Output = Result<TableDescription, StorageError>> + Send;
+}
+
+/// Supertrait combining all DynamoDB operation traits.
+///
+/// All storage backends must implement this to provide a complete
+/// DynamoDB-compatible API. This trait has NO additional methods beyond
+/// the trait bounds — backend-specific concerns belong in ServerRuntimeHooks.
+pub trait StorageEngine:
+    TableEngine + DataEngine + MetadataEngine + StreamEngine + BackupEngine + WorkerStore + Send + Sync
+{
+}
+
+// Blanket implementation: any type implementing all 6 traits is a StorageEngine
+impl<T> StorageEngine for T where
+    T: TableEngine
+        + DataEngine
+        + MetadataEngine
+        + StreamEngine
+        + BackupEngine
+        + WorkerStore
+        + Send
+        + Sync
+{
+}
+
+/// Supertrait combining all catalog/management operation traits.
+///
+/// All storage backends must implement this to provide management API
+/// functionality (accounts, users, groups, roles, policies, settings, metrics).
+pub trait CatalogStore:
+    management_store::ManagementStore
+    + management_store::AdminStore
+    + management_store::SettingsStore
+    + management_store::MetricsStore
+    + management_store::RateLimitStore
+    + authorization_store::AuthorizationStore
+    + Send
+    + Sync
+{
+    /// Get the cached encryption key (if available).
+    ///
+    /// Returns None if encryption key is not cached. This is used by
+    /// cmd_serve to construct the auth provider without re-querying
+    /// the settings table.
+    fn cached_encryption_key(&self) -> Option<String>;
 }

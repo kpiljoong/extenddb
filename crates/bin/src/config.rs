@@ -4,7 +4,6 @@
 //! Shared configuration types for the extenddb binary.
 
 use extenddb_core::limits::LimitsConfig;
-use extenddb_storage_postgres::PostgresStorageConfig;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -112,21 +111,75 @@ impl Default for TlsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct StorageConfig {
-    /// Storage backend selector (e.g. "postgres"). Only postgres is currently supported.
-    #[serde(default = "default_backend", rename = "backend")]
+    /// Storage backend selector (e.g. "postgres").
     pub _backend: String,
-    #[serde(default)]
-    pub postgres: PostgresStorageConfig,
+    /// Backend-specific configuration (trait object).
+    config: Box<dyn extenddb_storage::config::StorageConfig>,
+}
+
+impl StorageConfig {
+    /// Get the connection configuration string for this backend.
+    ///
+    /// Delegates to the backend-specific config trait object. This wrapper
+    /// provides a clean API without exposing the trait object to callers.
+    pub fn connection_config(&self) -> &str {
+        self.config.connection_config()
+    }
+
+    /// Get the maximum connections for data operations.
+    pub fn max_connections(&self) -> u32 {
+        self.config.max_connections()
+    }
+
+    /// Get the maximum connections for catalog operations.
+    pub fn max_catalog_connections(&self) -> u32 {
+        self.config.max_catalog_connections()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StorageConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        // Deserialize into a raw TOML value first
+        let value: toml::Value = toml::Value::deserialize(deserializer)?;
+
+        // Extract the backend field
+        let backend = value
+            .get("backend")
+            .and_then(|v| v.as_str())
+            .unwrap_or("postgres")
+            .to_string();
+
+        // Get the backend-specific table (e.g., [storage.postgres])
+        let backend_table: &toml::Table = value
+            .get(&backend)
+            .and_then(|v| v.as_table())
+            .ok_or_else(|| {
+                D::Error::custom(format!("Missing [storage.{}] section in config", backend))
+            })?;
+
+        // Use the registry to deserialize the backend config
+        let config = extenddb_storage::config::deserialize_storage_config(&backend, backend_table)
+            .map_err(D::Error::custom)?;
+
+        Ok(StorageConfig {
+            _backend: backend,
+            config,
+        })
+    }
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             _backend: default_backend(),
-            postgres: PostgresStorageConfig::default(),
+            config: Box::new(extenddb_storage_postgres::PostgresStorageConfig::default()),
         }
     }
 }
@@ -237,17 +290,13 @@ pub fn load(config_path: &str) -> anyhow::Result<AppConfig> {
     Ok(config.try_deserialize()?)
 }
 
-/// Redact password from a `PostgreSQL` connection string for safe logging (REQ-LOG-002).
-pub fn redact_password(conn: &str) -> String {
-    if let Some(at) = conn.find('@') {
-        if let Some(colon) = conn[..at].rfind(':') {
-            let scheme_end = conn.find("://").map_or(0, |i| i + 3);
-            if colon >= scheme_end {
-                return format!("{}:***@{}", &conn[..colon], &conn[at + 1..]);
-            }
-        }
-    }
-    conn.to_owned()
+/// Redact password from a connection string for safe logging (REQ-LOG-002).
+///
+/// Uses the backend-specific operations engine to handle different connection
+/// string formats (PostgreSQL, Cassandra, etc.).
+pub fn redact_password(backend: &str, conn: &str) -> String {
+    extenddb_storage::operations::redact_connection_string(backend, conn)
+        .unwrap_or_else(|_| conn.to_owned())
 }
 
 /// Return the current OS username, falling back to given default username: e.g. `"postgres"`.
@@ -255,26 +304,18 @@ pub fn whoami(default: &str) -> String {
     std::env::var("USER").unwrap_or_else(|_| default.to_owned())
 }
 
-/// Validate that a string is safe to use as a double-quoted `PostgreSQL` identifier.
+/// Validate that a string is safe to use as a database identifier for DDL.
 ///
-/// Rejects strings containing double quotes, null bytes, or non-ASCII characters.
-/// This is a defense-in-depth measure for `format!`-based DDL where parameterized
+/// Delegates to the backend-specific operations engine. Rejects strings
+/// containing characters unsafe for `format!`-based DDL where parameterized
 /// queries are not supported (e.g. `CREATE DATABASE`, `DROP DATABASE`).
 ///
 /// # Errors
 ///
 /// Returns an error describing the invalid character found.
-pub fn validate_pg_identifier(name: &str, label: &str) -> anyhow::Result<()> {
-    if name.contains('"') {
-        anyhow::bail!("{label} must not contain double quotes");
-    }
-    if name.contains('\0') {
-        anyhow::bail!("{label} must not contain null bytes");
-    }
-    if !name.is_ascii() {
-        anyhow::bail!("{label} must contain only ASCII characters");
-    }
-    Ok(())
+pub fn validate_identifier(backend: &str, name: &str, label: &str) -> anyhow::Result<()> {
+    extenddb_storage::operations::validate_identifier(backend, name, label)
+        .map_err(|e| anyhow::anyhow!("{:?}", e))
 }
 
 /// Keys whose values must be redacted in configuration displays.
@@ -305,6 +346,7 @@ fn redact_if_sensitive(key: &str, val: &str) -> String {
 /// sensitive values (connection strings, passwords, keys).
 pub fn build_config_entries(cfg: &AppConfig) -> Vec<(String, String)> {
     let r = redact_if_sensitive;
+    let backend = &cfg.storage._backend;
     let mut entries = vec![
         ("server.bind_addr".into(), cfg.server.bind_addr.clone()),
         ("server.port".into(), cfg.server.port.to_string()),
@@ -329,19 +371,16 @@ pub fn build_config_entries(cfg: &AppConfig) -> Vec<(String, String)> {
                 .map_or("none".into(), |b| b.to_string()),
         ),
         (
-            "storage.postgres.connection_string".into(),
-            r("connection_string", &cfg.storage.postgres.connection_string),
+            format!("storage.{}.connection_string", backend),
+            r("connection_string", cfg.storage.connection_config()),
         ),
         (
-            "storage.postgres.pool_size".into(),
-            cfg.storage.postgres.pool_size.to_string(),
+            format!("storage.{}.pool_size", backend),
+            cfg.storage.max_connections().to_string(),
         ),
         (
-            "storage.postgres.catalog_pool_size".into(),
-            cfg.storage
-                .postgres
-                .catalog_pool_size
-                .map_or("default".into(), |n| n.to_string()),
+            format!("storage.{}.catalog_pool_size", backend),
+            cfg.storage.max_catalog_connections().to_string(),
         ),
         ("auth.provider".into(), cfg.auth.provider.clone()),
         ("logging.level".into(), cfg.logging.level.clone()),

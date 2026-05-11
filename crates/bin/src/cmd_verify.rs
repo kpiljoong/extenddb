@@ -12,9 +12,6 @@
 //! abstraction would defeat the purpose of an independent health check.
 
 use clap::Args;
-use extenddb_storage_postgres::CATALOG_VERSION;
-use extenddb_storage_postgres::parse_connection_string;
-use sqlx::postgres::PgPoolOptions;
 
 use crate::config;
 
@@ -34,7 +31,17 @@ pub async fn run(args: VerifyArgs) -> anyhow::Result<()> {
         );
     }
     let app_config = config::load(&args.config)?;
-    let parts = parse_connection_string(&app_config.storage.postgres.connection_string)?;
+    let backend = &app_config.storage._backend;
+    let expected_version = extenddb_storage::operations::catalog_version(backend)
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    // Parse connection string to get database name for display
+    let parts = extenddb_storage::operations::parse_connection_string(
+        backend,
+        app_config.storage.connection_config(),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to parse connection string: {}", e))?;
+
     let mut errors = 0u32;
 
     println!("=== extenddb verify ===");
@@ -42,87 +49,72 @@ pub async fn run(args: VerifyArgs) -> anyhow::Result<()> {
     println!("Catalog database: {}", parts.database);
     println!();
 
-    // Check 1: Catalog connection.
+    // Create settings and diagnostics store
     println!("--- Checking catalog connection...");
-    let catalog_pool = match PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&app_config.storage.postgres.connection_string)
-        .await
+    let store = match extenddb_storage::settings_store::create_settings_store(
+        backend,
+        app_config.storage.connection_config(),
+    )
+    .await
     {
-        Ok(pool) => {
+        Ok(store) => {
             println!("  OK: Connected to catalog.");
-            pool
+            store
         }
         Err(e) => {
-            println!("  FAIL: Cannot connect to catalog database: {e}");
+            println!("  FAIL: Cannot connect to catalog database: {}", e);
             anyhow::bail!("Cannot proceed without catalog connection");
         }
     };
 
     // Check 2: Catalog version (D-10: strict parsing).
     println!("--- Checking catalog version...");
-    let version_row: Option<(String,)> =
-        sqlx::query_as("SELECT value FROM settings WHERE key = 'catalog_version'")
-            .fetch_optional(&catalog_pool)
-            .await?;
-    match version_row {
-        Some((v,)) => match v.parse::<extenddb_core::version::CatalogVersion>() {
-            Ok(found) if found == CATALOG_VERSION => {
-                println!("  OK: Catalog version {found}");
-            }
-            Ok(found) => {
-                println!("  WARN: Catalog version {found} (binary expects {CATALOG_VERSION})");
+    match store.get_setting("catalog_version").await {
+        Ok(Some(v)) => {
+            if v == expected_version {
+                println!("  OK: Catalog version {v}");
+            } else {
+                println!("  WARN: Catalog version {v} (binary expects {expected_version})");
                 errors += 1;
             }
-            Err(e) => {
-                println!("  FAIL: Malformed catalog version in database: {e}");
-                errors += 1;
-            }
-        },
-        None => {
+        }
+        Ok(None) => {
             println!("  FAIL: No catalog version found. Run 'extenddb init'.");
+            errors += 1;
+        }
+        Err(e) => {
+            println!("  FAIL: Failed to read catalog version: {:?}", e);
             errors += 1;
         }
     }
 
     // Check 3: Data database connection.
     println!("--- Checking data database...");
-    let data_conn: Result<Option<(String,)>, _> =
-        sqlx::query_as("SELECT value FROM settings WHERE key = 'data_database_connection_string'")
-            .fetch_optional(&catalog_pool)
-            .await;
 
-    let data_name: Result<Option<(String,)>, _> =
-        sqlx::query_as("SELECT value FROM settings WHERE key = 'data_database_name'")
-            .fetch_optional(&catalog_pool)
-            .await;
+    // Create diagnostics store (reuse for data DB test and table/index counts)
+    let diag_store = extenddb_storage::diagnostics_store::create_diagnostics_store(
+        backend,
+        app_config.storage.connection_config(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create diagnostics store: {}", e))?;
 
-    if let (Ok(Some((conn,))), Ok(Some((db_name,)))) = (data_conn, data_name) {
-        match PgPoolOptions::new().max_connections(1).connect(&conn).await {
-            Ok(_) => println!("  OK: Connected to data database '{db_name}'."),
-            Err(e) => {
-                println!("  FAIL: Cannot connect to data database '{db_name}': {e}");
-                errors += 1;
-            }
+    match diag_store.test_data_database_connection().await {
+        Ok(db_name) => println!("  OK: Connected to data database '{db_name}'."),
+        Err(e) => {
+            println!("  FAIL: {}", e);
+            errors += 1;
         }
-    } else {
-        println!("  FAIL: No data database registered in catalog. Run 'extenddb init'.");
-        errors += 1;
     }
 
     // Check 4: Enumerate tables and indexes.
     println!("--- Enumerating tables...");
-    let table_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tables")
-        .fetch_one(&catalog_pool)
-        .await
-        .unwrap_or((0,));
-    println!("  Tables: {}", table_count.0);
 
-    let index_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM indexes")
-        .fetch_one(&catalog_pool)
-        .await
-        .unwrap_or((0,));
-    println!("  Indexes: {}", index_count.0);
+    let table_count = diag_store.count_tables().await.unwrap_or(0);
+    println!("  Tables: {}", table_count);
+
+    let index_count = diag_store.count_indexes().await.unwrap_or(0);
+    println!("  Indexes: {}", index_count);
 
     println!();
     if errors == 0 {

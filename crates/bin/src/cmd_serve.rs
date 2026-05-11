@@ -12,9 +12,7 @@ use extenddb_auth::BuiltinAuthProvider;
 use extenddb_server::AppState;
 use extenddb_storage::management_store::SettingsStore;
 use extenddb_storage_postgres::DbCredentialStore;
-use extenddb_storage_postgres::{
-    CATALOG_VERSION, PostgresCatalogStore, PostgresConfig, PostgresEngine,
-};
+use extenddb_storage_postgres::{PostgresCatalogStore, PostgresConfig, PostgresEngine};
 use syslog_tracing::{Facility, Options, Syslog};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, reload, util::SubscriberInitExt};
 
@@ -86,15 +84,19 @@ pub fn run(args: &ServeArgs) -> anyhow::Result<()> {
     // D-2: Print startup banner to stdout before daemonizing so the user
     // gets confirmation the server is starting. P57 Bug 4 fix: say "starting"
     // not "listening" — the server isn't actually accepting connections yet.
+    let backend = &app_config.storage._backend;
+    let catalog_version = extenddb_storage::operations::catalog_version(backend)
+        .unwrap_or_else(|_| "unknown".to_string());
     println!(
         "extenddb {} (catalog {}) starting on {}",
         env!("CARGO_PKG_VERSION"),
-        CATALOG_VERSION,
+        catalog_version,
         bind_addr,
     );
     println!(
-        "  storage: postgres ({})",
-        config::redact_password(&app_config.storage.postgres.connection_string),
+        "  storage: {} ({})",
+        backend,
+        config::redact_password(backend, app_config.storage.connection_config()),
     );
 
     // D-3: Write PID file so `extenddb status` can report the daemon PID.
@@ -166,7 +168,8 @@ async fn serve(
     // server (e.g., Postgres connection failure). The PID file was already
     // written by Daemonize in run().
     let pid_path = pid_file_path(&run_dir, port);
-    let result = serve_inner(app_config, std_listener, port, run_dir).await;
+    let backend = app_config.storage._backend.clone();
+    let result = serve_inner(app_config, std_listener, port, run_dir, backend).await;
     if let Err(ref e) = result {
         let _ = std::fs::remove_file(&pid_path);
         // P57 Bug 7: Log fatal errors to syslog. After daemonize, stderr is
@@ -185,7 +188,11 @@ async fn serve_inner(
     std_listener: TcpListener,
     port: u16,
     run_dir: String,
+    backend: String,
 ) -> anyhow::Result<()> {
+    let catalog_version = extenddb_storage::operations::catalog_version(&backend)
+        .unwrap_or_else(|_| "unknown".to_string());
+    
     // Init logging (REQ-LOG-003, REQ-LOG-006) — always syslog in daemon mode.
     // D-3: sqlx messages are controlled by an independent `sqlx_log_level`
     // runtime setting (default: warn). Both extenddb and sqlx messages use the
@@ -226,8 +233,8 @@ async fn serve_inner(
     }
 
     let pg_config = PostgresConfig {
-        connection_string: app_config.storage.postgres.connection_string.clone(),
-        pool_size: app_config.storage.postgres.pool_size,
+        connection_string: app_config.storage.connection_config().to_string(),
+        pool_size: app_config.storage.max_connections(),
         max_item_size_bytes: app_config.limits.max_item_size_bytes,
     };
     let storage = PostgresEngine::new(&pg_config, &app_config.server.region).await?;
@@ -255,12 +262,12 @@ async fn serve_inner(
     tracing::info!(
         "extenddb {} (catalog {}) starting — bind={}:{}, region={}, auth={}, catalog_db={}, data_db={}, log_output=syslog, log_level={}",
         env!("CARGO_PKG_VERSION"),
-        CATALOG_VERSION,
+        catalog_version,
         app_config.server.bind_addr,
         port,
         app_config.server.region,
         app_config.auth.provider,
-        config::redact_password(&app_config.storage.postgres.connection_string),
+        config::redact_password(&backend, app_config.storage.connection_config()),
         data_db_info,
         app_config.logging.level,
     );
@@ -301,15 +308,11 @@ async fn serve_inner(
     tokio::spawn(workers::capacity_warning_worker());
 
     // Management API: create pool for admin/account CRUD and authz queries.
-    let catalog_pool_size = app_config
-        .storage
-        .postgres
-        .catalog_pool_size
-        .unwrap_or(app_config.storage.postgres.pool_size);
+    let catalog_pool_size = app_config.storage.max_catalog_connections();
     let catalog_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(catalog_pool_size)
         .min_connections(catalog_pool_size.min(2))
-        .connect(&app_config.storage.postgres.connection_string)
+        .connect(app_config.storage.connection_config())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create management API pool: {e}"))?;
 
@@ -460,7 +463,7 @@ async fn serve_inner(
             format!(
                 "{} · catalog {} · {}",
                 env!("CARGO_PKG_VERSION"),
-                CATALOG_VERSION,
+                catalog_version,
                 env!("EXTENDDB_GIT_HASH"),
             )
             .as_str(),
