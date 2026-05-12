@@ -53,15 +53,15 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
 
     let mut data_db = String::new();
 
-    if let Ok(ref bs) = bootstrap {
-        let catalog_db = bs.catalog_database_name();
-        let endpoint = bs.endpoint_info();
+    if let Ok(ref bootstrap) = bootstrap {
+        let catalog_db = bootstrap.catalog_database_name();
+        let endpoint = bootstrap.endpoint_info();
         println!("Catalog database: {catalog_db}");
         println!("{backend}:         {endpoint}");
         println!();
 
         println!("--- Tables in catalog:");
-        let tables = bs.list_table_names().await.unwrap_or_default();
+        let tables = bootstrap.list_table_names().await.unwrap_or_default();
         if tables.is_empty() {
             println!("  (none)");
         } else {
@@ -71,7 +71,7 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
         }
 
         // Get data database name.
-        if let Ok(Some(db)) = bs.get_data_db_name().await {
+        if let Ok(Some(db)) = bootstrap.get_data_db_name().await {
             data_db = db;
             println!();
             println!("Data database:    {data_db}");
@@ -102,11 +102,11 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
     // Reconnect as admin for DDL operations (the catalog pool must be dropped
     // before we can DROP DATABASE).
     drop(bootstrap);
-    let bs = extenddb_storage::bootstrapper::create_bootstrapper(backend, &args.config, &cli_args)
+    let bootstrap = extenddb_storage::bootstrapper::create_bootstrapper(backend, &args.config, &cli_args)
         .await
         .map_err(|e| anyhow::anyhow!("Cannot connect as admin: {e:?}"))?;
 
-    bs.drop_databases(&data_db)
+    bootstrap.drop_databases(&data_db)
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
