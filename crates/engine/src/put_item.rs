@@ -32,9 +32,23 @@ pub async fn handle_put_item<S: TableEngine + DataEngine>(
     ctx: &OperationContext<S>,
 ) -> Result<DispatchResult, DynamoDbError> {
     let input: PutItemInput = serde_json::from_value(body).map_err(|e| {
-        DynamoDbError::SerializationException(format!(
-            "Start of structure or map found where not expected: {e}"
-        ))
+        let msg = e.to_string();
+        if msg.contains("parameter values were invalid")
+            || msg.contains("may not be empty")
+            || msg.contains("contains duplicates")
+            || msg.contains("Null attribute value")
+            || msg.contains("validation error detected")
+        {
+            DynamoDbError::ValidationException(msg)
+        } else if msg.contains("missing field") && msg.contains("TableName") {
+            DynamoDbError::ValidationException(
+                "1 validation error detected: Value null at 'tableName' failed to satisfy constraint: Member must not be null".to_owned()
+            )
+        } else {
+            DynamoDbError::SerializationException(format!(
+                "Start of structure or map found where not expected: {e}"
+            ))
+        }
     })?;
 
     let key_info = ctx
