@@ -1,6 +1,6 @@
 // Copyright 2026 ExtendDB contributors
 // SPDX-License-Identifier: Apache-2.0
-use crate::error::{DynamoDbError, ErrorMessageKey, error_message};
+use crate::error::{DynamoDbError, ErrorMessageKey, error_message, validation_error};
 use crate::limits::LimitsConfig;
 use crate::types::{
     AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DeleteItemInput,
@@ -11,10 +11,16 @@ use crate::types::{
 /// Validate a table name per Virtual `DynamoDB` rules.
 /// REQ-LIM-020: 3-255 chars. REQ-LIM-021: [a-zA-Z0-9_.-]
 pub fn validate_table_name(name: &str, limits: &LimitsConfig) -> Result<(), DynamoDbError> {
-    if name.len() < limits.min_table_name_length || name.len() > limits.max_table_name_length {
-        return Err(DynamoDbError::ValidationException(error_message(
-            ErrorMessageKey::TableNameTooShort,
-            &[],
+    if name.len() < limits.min_table_name_length {
+        return Err(DynamoDbError::ValidationException(validation_error(
+            name, "tableName",
+            &format!("Member must have length greater than or equal to {}", limits.min_table_name_length),
+        )));
+    }
+    if name.len() > limits.max_table_name_length {
+        return Err(DynamoDbError::ValidationException(validation_error(
+            name, "tableName",
+            &format!("Member must have length less than or equal to {}", limits.max_table_name_length),
         )));
     }
     validate_table_name_chars(name)?;
@@ -91,6 +97,17 @@ pub fn validate_create_table(
 /// Maximum number of HASH or RANGE elements in a multi-part key schema.
 const MAX_MULTIPART_KEY_ELEMENTS: usize = 4;
 
+fn format_key_schema_value(ks: &[KeySchemaElement]) -> String {
+    let elements: Vec<String> = ks.iter().map(|e| {
+        let kt = match e.key_type {
+            KeyType::Hash => "HASH",
+            KeyType::Range => "RANGE",
+        };
+        format!("KeySchemaElement(attributeName={}, keyType={})", e.attribute_name, kt)
+    }).collect();
+    format!("[{}]", elements.join(", "))
+}
+
 fn validate_key_schema(
     input: &CreateTableInput,
     allow_multipart: bool,
@@ -113,9 +130,10 @@ fn validate_key_schema(
     } else {
         // Standard DynamoDB: 1 HASH + optional 1 RANGE
         if input.key_schema.len() > 2 {
-            return Err(DynamoDbError::ValidationException(error_message(
-                ErrorMessageKey::KeySchemaTooMany,
-                &[],
+            let ks_repr = format_key_schema_value(&input.key_schema);
+            return Err(DynamoDbError::ValidationException(validation_error(
+                &ks_repr, "keySchema",
+                "Member must have length less than or equal to 2",
             )));
         }
         if input.key_schema.len() == 2 && input.key_schema[1].key_type != KeyType::Range {

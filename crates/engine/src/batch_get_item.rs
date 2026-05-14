@@ -50,6 +50,15 @@ pub async fn handle_batch_get_item<S: TableEngine + DataEngine>(
         ));
     }
 
+    // Validate: per-table key count <= 100
+    for (table_name, ka) in &input.request_items {
+        if ka.keys.len() > MAX_BATCH_GET_KEYS {
+            return Err(DynamoDbError::ValidationException(format!(
+                "1 validation error detected: Value at 'RequestItems.{table_name}.member.Keys' failed to satisfy constraint: Member must have length less than or equal to 100"
+            )));
+        }
+    }
+
     // Validate: total keys across all tables <= 100
     let total_keys: usize = input.request_items.values().map(|ka| ka.keys.len()).sum();
     if total_keys > MAX_BATCH_GET_KEYS {

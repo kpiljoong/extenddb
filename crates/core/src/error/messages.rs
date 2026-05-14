@@ -4,6 +4,29 @@
 //! Error message templates captured from real DynamoDB.
 //! These are the exact messages DynamoDB returns — tenet 4 (errors are contracts).
 
+/// Format a single validation constraint error in DynamoDB's exact format.
+#[must_use]
+pub fn validation_error(value: &str, field: &str, constraint: &str) -> String {
+    format!(
+        "1 validation error detected: Value '{value}' at '{field}' failed to satisfy constraint: {constraint}"
+    )
+}
+
+/// Format multiple validation constraint errors in DynamoDB's exact format.
+#[must_use]
+pub fn validation_errors(errors: &[(&str, &str, &str)]) -> String {
+    let count = errors.len();
+    let details: Vec<String> = errors
+        .iter()
+        .map(|(value, field, constraint)| {
+            format!("Value '{value}' at '{field}' failed to satisfy constraint: {constraint}")
+        })
+        .collect();
+    format!("{count} validation error{} detected: {}",
+        if count == 1 { "" } else { "s" },
+        details.join("; "))
+}
+
 /// Keys for error message templates. Compile-time checked — no stringly-typed lookups.
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorMessageKey {

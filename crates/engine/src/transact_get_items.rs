@@ -42,14 +42,15 @@ pub async fn handle_transact_get_items<S: TableEngine + DataEngine>(
 
     if input.transact_items.is_empty() {
         return Err(DynamoDbError::ValidationException(
-            "1 validation error detected: Value null at 'transactItems' failed to satisfy constraint: Member must not be null".to_owned(),
+            "1 validation error detected: Value '[]' at 'transactItems' failed to satisfy constraint: Member must have length greater than or equal to 1".to_owned(),
         ));
     }
 
     if input.transact_items.len() > MAX_TRANSACT_GET_ITEMS {
-        return Err(DynamoDbError::ValidationException(
-            "Member must have length less than or equal to 100".to_owned(),
-        ));
+        return Err(DynamoDbError::ValidationException(format!(
+            "1 validation error detected: Value '{}' at 'transactItems' failed to satisfy constraint: Member must have length less than or equal to 100",
+            format_transact_items_value(input.transact_items.len()),
+        )));
     }
 
     // Resolve table key info for each item
@@ -143,4 +144,9 @@ pub async fn handle_transact_get_items<S: TableEngine + DataEngine>(
             ..Default::default()
         },
     })
+}
+
+fn format_transact_items_value(count: usize) -> String {
+    let placeholders: Vec<&str> = (0..count).map(|_| "TransactGetItem(get=Get(...))").collect();
+    format!("[{}]", placeholders.join(", "))
 }
