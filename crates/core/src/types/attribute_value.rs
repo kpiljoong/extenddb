@@ -99,7 +99,7 @@ impl<'de> Visitor<'de> for AttributeValueVisitor {
                     .as_str()
                     .ok_or_else(|| de::Error::custom("N value must be a string"))?;
                 let normalized = crate::validation::number::validate_and_normalize_number(n)
-                    .unwrap_or_else(|_| n.to_owned());
+                    .map_err(|e| de::Error::custom(e.to_string()))?;
                 Ok(AttributeValue::N(normalized))
             }
             "B" => {
@@ -155,8 +155,8 @@ impl<'de> Visitor<'de> for AttributeValueVisitor {
                         let s = v
                             .as_str()
                             .ok_or_else(|| de::Error::custom("NS elements must be strings"))?;
-                        Ok(crate::validation::number::validate_and_normalize_number(s)
-                            .unwrap_or_else(|_| s.to_owned()))
+                        crate::validation::number::validate_and_normalize_number(s)
+                            .map_err(|e| de::Error::custom(e.to_string()))
                     })
                     .collect::<Result<_, _>>()?;
                 Ok(AttributeValue::NS(set))
@@ -392,6 +392,24 @@ mod tests {
         let json = r#"{"X":"hello"}"#;
         let err = serde_json::from_str::<AttributeValue>(json).unwrap_err();
         assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn invalid_number_rejected_at_deserialization() {
+        let json = r#"{"N":"abc"}"#;
+        let err = serde_json::from_str::<AttributeValue>(json).unwrap_err();
+        assert!(err.to_string().contains("Supplied AttributeValue"));
+
+        let json = r#"{"N":"1E999"}"#;
+        let err = serde_json::from_str::<AttributeValue>(json).unwrap_err();
+        assert!(err.to_string().contains("Supplied AttributeValue"));
+    }
+
+    #[test]
+    fn invalid_number_in_ns_rejected() {
+        let json = r#"{"NS":["1","abc"]}"#;
+        let err = serde_json::from_str::<AttributeValue>(json).unwrap_err();
+        assert!(err.to_string().contains("Supplied AttributeValue"));
     }
 
     #[test]
