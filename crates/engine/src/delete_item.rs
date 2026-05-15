@@ -31,6 +31,8 @@ pub async fn handle_delete_item<S: TableEngine + DataEngine>(
 ) -> Result<DispatchResult, DynamoDbError> {
     let input: DeleteItemInput = serde_json::from_value(body).map_err(crate::deserialize_error)?;
 
+    extenddb_core::validation::validate_table_name(&input.table_name, &ctx.limits)?;
+
     let key_info = ctx
         .table_key_info(&input.table_name)
         .await
