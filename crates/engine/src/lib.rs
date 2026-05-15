@@ -19,6 +19,7 @@ mod describe_limits;
 mod describe_table;
 mod expected;
 mod expression_helpers;
+mod legacy_filter;
 mod get_item;
 mod import_export;
 mod import_export_io;

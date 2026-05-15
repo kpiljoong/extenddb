@@ -3,13 +3,17 @@
 
 //! `Query` operation handler.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use extenddb_core::error::DynamoDbError;
 use extenddb_core::expression::PathElement;
-use extenddb_core::expression::{parse_key_condition, parse_projection, tokenize_with_limit};
+use extenddb_core::expression::{
+    parse_key_condition, parse_projection, tokenize_with_limit, ExpressionMaps,
+};
 use extenddb_core::types::{
-    IndexType, QueryInput, QueryOutput, Select, TableKeyInfo, item_size_bytes,
+    IndexType, KeyType, QueryInput, QueryOutput, Select, TableKeyInfo, item_size_bytes,
 };
 use extenddb_storage::DataEngine;
 use extenddb_storage::TableEngine;
@@ -19,6 +23,7 @@ use crate::capacity_helpers;
 use crate::create_table::storage_err_to_dynamo;
 use crate::expression_helpers::{build_expression_maps, parse_optional_filter};
 use crate::index_helpers::combined_lek_key_schema;
+use crate::legacy_filter::{desugar_filter, desugar_key_conditions};
 use crate::read_helpers::apply_post_read;
 use crate::serialize_output;
 use crate::{DispatchMetrics, DispatchResult};
@@ -98,25 +103,78 @@ pub async fn handle_query<S: TableEngine + DataEngine>(
         key_info.clone()
     };
 
+    // --- Legacy vs expression mutual exclusivity checks ---
+    let has_kce = input.key_condition_expression.is_some();
+    let has_kc = input.key_conditions.as_ref().is_some_and(|m| !m.is_empty());
+
+    if has_kce && has_kc {
+        return Err(DynamoDbError::ValidationException(
+            "Can not use both expression and non-expression parameters in the same request: \
+             Non-expression parameters: {KeyConditions} Expression parameters: {KeyConditionExpression}"
+                .to_owned(),
+        ));
+    }
+
+    let has_fe = input.filter_expression.is_some();
+    let has_qf = input.query_filter.as_ref().is_some_and(|m| !m.is_empty());
+
+    if has_fe && has_qf {
+        return Err(DynamoDbError::ValidationException(
+            "Can not use both expression and non-expression parameters in the same request: \
+             Non-expression parameters: {QueryFilter} Expression parameters: {FilterExpression}"
+                .to_owned(),
+        ));
+    }
+
+    let has_pe = input.projection_expression.is_some();
+    let has_atg = input.attributes_to_get.as_ref().is_some_and(|a| !a.is_empty());
+
+    if has_pe && has_atg {
+        return Err(DynamoDbError::ValidationException(
+            "Can not use both expression and non-expression parameters in the same request: \
+             Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}"
+                .to_owned(),
+        ));
+    }
+
+    // Build expression maps from request (used for expression-based parameters)
     let maps = build_expression_maps(
         input.expression_attribute_names.as_ref(),
         input.expression_attribute_values.as_ref(),
     );
 
-    // Parse KeyConditionExpression (required)
-    let kce_str = input.key_condition_expression.as_deref().ok_or_else(|| {
-        DynamoDbError::ValidationException(
+    // Parse KeyConditionExpression or desugar legacy KeyConditions
+    let (mut key_condition, legacy_kc_maps) = if let Some(kce_str) =
+        input.key_condition_expression.as_deref()
+    {
+        let tokens = tokenize_with_limit(kce_str, ctx.limits.max_expression_tokens)?;
+        (parse_key_condition(&tokens)?, None)
+    } else if let Some(ref kc) = input.key_conditions {
+        let key_schema_pairs: Vec<(String, bool)> = query_key_info
+            .key_schema
+            .iter()
+            .map(|ks| (ks.attribute_name.clone(), ks.key_type == KeyType::Hash))
+            .collect();
+        let (kc_parsed, kc_maps) = desugar_key_conditions(kc, &key_schema_pairs)?;
+        (kc_parsed, Some(kc_maps))
+    } else {
+        return Err(DynamoDbError::ValidationException(
             "Either the KeyConditions or KeyConditionExpression parameter must be specified in the request."
                 .to_owned(),
-        )
-    })?;
-    let tokens = tokenize_with_limit(kce_str, ctx.limits.max_expression_tokens)?;
-    let mut key_condition = parse_key_condition(&tokens)?;
+        ));
+    };
+
+    // Use legacy maps for key condition resolution if KeyConditions was used
+    let effective_maps = if let Some(ref kc_maps) = legacy_kc_maps {
+        kc_maps
+    } else {
+        &maps
+    };
 
     // Correct PK/SK assignment when both clauses are equality comparisons.
     // The parser can't distinguish PK from SK without the key schema.
     let pk_attr = &query_key_info.key_schema[0].attribute_name;
-    key_condition.resolve_pk_sk(pk_attr, &maps.names)?;
+    key_condition.resolve_pk_sk(pk_attr, &effective_maps.names)?;
 
     // For multi-part key schemas (GSIs with >1 HASH attribute), reclassify
     // the parsed conditions so all HASH attributes go to pk_path/extra_pk_conditions
@@ -127,7 +185,7 @@ pub async fn handle_query<S: TableEngine + DataEngine>(
             .iter()
             .map(|ks| ks.attribute_name.as_str())
             .collect();
-        key_condition.resolve_multipart(&hash_attrs, &maps.names)?;
+        key_condition.resolve_multipart(&hash_attrs, &effective_maps.names)?;
 
         // Validate all HASH attributes are present in the KeyConditionExpression.
         let provided_count = 1 + key_condition.extra_pk_conditions.len();
@@ -136,12 +194,13 @@ pub async fn handle_query<S: TableEngine + DataEngine>(
             let missing = hash_attrs
                 .iter()
                 .find(|attr| {
-                    let pk_name = resolve_path_attr_name(&key_condition.pk_path, &maps.names);
+                    let pk_name =
+                        resolve_path_attr_name(&key_condition.pk_path, &effective_maps.names);
                     if pk_name.as_deref() == Some(*attr) {
                         return false;
                     }
                     !key_condition.extra_pk_conditions.iter().any(|(path, _)| {
-                        resolve_path_attr_name(path, &maps.names).as_deref() == Some(*attr)
+                        resolve_path_attr_name(path, &effective_maps.names).as_deref() == Some(*attr)
                     })
                 })
                 .unwrap_or(&hash_attrs[0]);
@@ -151,11 +210,39 @@ pub async fn handle_query<S: TableEngine + DataEngine>(
         }
     }
 
-    // Parse FilterExpression
-    let filter = parse_optional_filter(input.filter_expression.as_deref(), &ctx.limits)?;
+    // Parse FilterExpression or desugar legacy QueryFilter
+    let (filter, filter_maps) = if let Some(ref qf) = input.query_filter {
+        if !qf.is_empty() {
+            let cond_op = input.conditional_operator.unwrap_or_default();
+            let (expr, fmaps) = desugar_filter(qf, cond_op)?;
+            (Some(expr), Some(fmaps))
+        } else {
+            (parse_optional_filter(input.filter_expression.as_deref(), &ctx.limits)?, None)
+        }
+    } else {
+        (parse_optional_filter(input.filter_expression.as_deref(), &ctx.limits)?, None)
+    };
 
-    // Parse ProjectionExpression
-    let projection = if let Some(ref proj_str) = input.projection_expression {
+    // Parse ProjectionExpression or desugar legacy AttributesToGet
+    let (effective_projection_str, extra_proj_names) = if input.projection_expression.is_some() {
+        (input.projection_expression.clone(), HashMap::new())
+    } else if let Some(ref attrs) = input.attributes_to_get {
+        let mut names_map = HashMap::new();
+        let placeholders: Vec<String> = attrs
+            .iter()
+            .enumerate()
+            .map(|(i, attr)| {
+                let placeholder = format!("#_ag{i}");
+                names_map.insert(placeholder.clone(), attr.clone());
+                placeholder
+            })
+            .collect();
+        (Some(placeholders.join(", ")), names_map)
+    } else {
+        (None, HashMap::new())
+    };
+
+    let projection = if let Some(ref proj_str) = effective_projection_str {
         let proj_tokens = tokenize_with_limit(proj_str, ctx.limits.max_expression_tokens)?;
         Some(parse_projection(&proj_tokens)?)
     } else {
@@ -171,7 +258,7 @@ pub async fn handle_query<S: TableEngine + DataEngine>(
         }
     }
     if let Some(Select::Count) = input.select {
-        if input.projection_expression.is_some() {
+        if effective_projection_str.is_some() {
             return Err(DynamoDbError::ValidationException(
                 "Cannot specify the ProjectionExpression when Select is COUNT".to_owned(),
             ));
@@ -185,13 +272,34 @@ pub async fn handle_query<S: TableEngine + DataEngine>(
         None
     };
 
+    // Build the combined expression maps used for storage query and post-read evaluation.
+    // Merges the base request maps with any legacy desugared maps and projection name maps.
+    let combined_maps = {
+        let mut names = maps.names.clone();
+        let mut values = maps.values.clone();
+
+        if let Some(ref kc_maps) = legacy_kc_maps {
+            values.extend(kc_maps.values.clone());
+        }
+        if let Some(ref fm) = filter_maps {
+            values.extend(fm.values.clone());
+        }
+        if !extra_proj_names.is_empty() {
+            for (k, v) in &extra_proj_names {
+                let stripped = k.strip_prefix('#').unwrap_or(k);
+                names.insert(stripped.to_owned(), v.clone());
+            }
+        }
+        ExpressionMaps::new(names, values)
+    };
+
     // Query storage
     let (raw_items, storage_last_key) = ctx
         .storage
         .query(
             &query_key_info,
             &key_condition,
-            &maps,
+            &combined_maps,
             input.scan_index_forward,
             input.limit,
             input.exclusive_start_key.as_ref(),
@@ -215,7 +323,7 @@ pub async fn handle_query<S: TableEngine + DataEngine>(
         storage_last_key,
         &filter,
         &projection,
-        &maps,
+        &combined_maps,
         &lek_key_schema,
         input.select.as_ref(),
         index_proj,
