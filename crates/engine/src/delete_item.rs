@@ -27,11 +27,20 @@ pub async fn handle_delete_item(
     body: Value,
     ctx: &OperationContext,
 ) -> Result<DispatchResult, DynamoDbError> {
-    let input: DeleteItemInput = serde_json::from_value(body).map_err(|e| {
-        DynamoDbError::SerializationException(format!(
-            "Start of structure or map found where not expected: {e}"
-        ))
-    })?;
+    crate::validate_enum_fields(
+        &body,
+        &[
+            ("ReturnValues", "returnValues", &["NONE", "ALL_OLD"]),
+            (
+                "ReturnConsumedCapacity",
+                "returnConsumedCapacity",
+                &["INDEXES", "TOTAL", "NONE"],
+            ),
+        ],
+    )?;
+    let input: DeleteItemInput = serde_json::from_value(body).map_err(crate::deserialize_error)?;
+
+    extenddb_core::validation::validate_table_name(&input.table_name, &ctx.limits)?;
 
     let key_info = ctx
         .table_key_info(&input.table_name)
@@ -53,6 +62,18 @@ pub async fn handle_delete_item(
         input.conditional_operator,
         &ctx.limits,
     )?;
+
+    if input.expected.is_none() || input.expected.as_ref().is_some_and(|m| m.is_empty()) {
+        let exprs: Vec<&extenddb_core::expression::Expr> = condition.iter().collect();
+        extenddb_core::expression::validate_unused_attributes(
+            &maps.names,
+            &maps.values,
+            &exprs,
+            &[],
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        )?;
+    }
 
     let return_old = input.return_values == ReturnValues::AllOld;
 

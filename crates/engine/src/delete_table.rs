@@ -14,11 +14,7 @@ pub async fn handle_delete_table(
     body: Value,
     ctx: &OperationContext,
 ) -> Result<Value, DynamoDbError> {
-    let input: DeleteTableInput = serde_json::from_value(body).map_err(|e| {
-        DynamoDbError::SerializationException(format!(
-            "Start of structure or map found where not expected: {e}"
-        ))
-    })?;
+    let input: DeleteTableInput = serde_json::from_value(body).map_err(crate::deserialize_error)?;
 
     validate_table_name(&input.table_name, &ctx.limits)?;
 

@@ -42,11 +42,8 @@ pub async fn handle_transact_write_items(
     body: Value,
     ctx: &OperationContext,
 ) -> Result<DispatchResult, DynamoDbError> {
-    let input: TransactWriteItemsInput = serde_json::from_value(body.clone()).map_err(|e| {
-        DynamoDbError::SerializationException(format!(
-            "Start of structure or map found where not expected: {e}"
-        ))
-    })?;
+    let input: TransactWriteItemsInput =
+        serde_json::from_value(body.clone()).map_err(crate::deserialize_error)?;
 
     // Compute fingerprint keyed by the client request token for collision
     // resistance. Must happen after parsing so the token is available.
@@ -58,14 +55,20 @@ pub async fn handle_transact_write_items(
 
     if input.transact_items.is_empty() {
         return Err(DynamoDbError::ValidationException(
-            "1 validation error detected: Value null at 'transactItems' failed to satisfy constraint: Member must not be null".to_owned(),
+            "1 validation error detected: Value '[]' at 'transactItems' failed to satisfy constraint: Member must have length greater than or equal to 1".to_owned(),
         ));
     }
 
     if input.transact_items.len() > MAX_TRANSACT_WRITE_ITEMS {
-        return Err(DynamoDbError::ValidationException(
-            "Member must have length less than or equal to 100".to_owned(),
-        ));
+        let items_repr = input
+            .transact_items
+            .iter()
+            .map(|_| "TransactWriteItem")
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(DynamoDbError::ValidationException(format!(
+            "1 validation error detected: Value '[{items_repr}]' at 'transactItems' failed to satisfy constraint: Member must have length less than or equal to 100"
+        )));
     }
 
     // Validate each item has exactly one operation
@@ -100,6 +103,14 @@ pub async fn handle_transact_write_items(
             ));
         }
         prepared.push(op);
+    }
+
+    // Validate total transaction size <= 4MB
+    let total_size: usize = prepared.iter().map(|op| op.item_size()).sum();
+    if total_size > 4 * 1024 * 1024 {
+        return Err(DynamoDbError::ValidationException(
+            "Transaction item size has exceeded the 4 MB limit".to_owned(),
+        ));
     }
 
     // Build storage operations
@@ -205,6 +216,17 @@ async fn prepare_write_op(
             put.expression_attribute_values.as_ref(),
         );
         let condition = parse_optional_condition(put.condition_expression.as_deref(), &ctx.limits)?;
+        {
+            let exprs: Vec<&extenddb_core::expression::Expr> = condition.iter().collect();
+            extenddb_core::expression::validate_unused_attributes(
+                &maps.names,
+                &maps.values,
+                &exprs,
+                &[],
+                &HashSet::new(),
+                &HashSet::new(),
+            )?;
+        }
         let stream =
             stream_capture::stream_view_type(&key_info).map(|vt| extenddb_storage::StreamCapture {
                 view_type: vt,
@@ -232,6 +254,17 @@ async fn prepare_write_op(
             del.expression_attribute_values.as_ref(),
         );
         let condition = parse_optional_condition(del.condition_expression.as_deref(), &ctx.limits)?;
+        {
+            let exprs: Vec<&extenddb_core::expression::Expr> = condition.iter().collect();
+            extenddb_core::expression::validate_unused_attributes(
+                &maps.names,
+                &maps.values,
+                &exprs,
+                &[],
+                &HashSet::new(),
+                &HashSet::new(),
+            )?;
+        }
         let stream =
             stream_capture::stream_view_type(&key_info).map(|vt| extenddb_storage::StreamCapture {
                 view_type: vt,
@@ -258,13 +291,22 @@ async fn prepare_write_op(
             upd.expression_attribute_names.as_ref(),
             upd.expression_attribute_values.as_ref(),
         );
-        let update_tokens = extenddb_core::expression::tokenize_with_limit(
-            &upd.update_expression,
-            ctx.limits.max_expression_tokens,
-        )?;
+        let update_tokens =
+            crate::expression_helpers::tokenize_expression(&upd.update_expression, &ctx.limits)?;
         let actions = parse_update(&update_tokens)?;
         validate_no_key_updates(&actions, &key_info, &maps)?;
         let condition = parse_optional_condition(upd.condition_expression.as_deref(), &ctx.limits)?;
+        {
+            let exprs: Vec<&extenddb_core::expression::Expr> = condition.iter().collect();
+            extenddb_core::expression::validate_unused_attributes(
+                &maps.names,
+                &maps.values,
+                &exprs,
+                &actions.iter().collect::<Vec<_>>(),
+                &HashSet::new(),
+                &HashSet::new(),
+            )?;
+        }
         let stream =
             stream_capture::stream_view_type(&key_info).map(|vt| extenddb_storage::StreamCapture {
                 view_type: vt,
@@ -292,14 +334,23 @@ async fn prepare_write_op(
             cc.expression_attribute_names.as_ref(),
             cc.expression_attribute_values.as_ref(),
         );
-        let tokens = extenddb_core::expression::tokenize_with_limit(
-            &cc.condition_expression,
-            ctx.limits.max_expression_tokens,
-        )?;
+        let tokens =
+            crate::expression_helpers::tokenize_expression(&cc.condition_expression, &ctx.limits)?;
         let condition = extenddb_core::expression::parse_condition_with_depth_limit(
             &tokens,
             ctx.limits.max_expression_depth,
         )?;
+        {
+            let exprs: Vec<&extenddb_core::expression::Expr> = vec![&condition];
+            extenddb_core::expression::validate_unused_attributes(
+                &maps.names,
+                &maps.values,
+                &exprs,
+                &[],
+                &HashSet::new(),
+                &HashSet::new(),
+            )?;
+        }
         return Ok(PreparedOp::ConditionCheck {
             key_info,
             key: cc.key.clone(),

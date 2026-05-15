@@ -177,7 +177,7 @@ impl MetadataEngine for PostgresEngine {
         Box::pin(async move {
             Self::validate_account_id(&account_id)?;
             let (table_id,): (String,) = sqlx::query_as(
-                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2",
+                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2"
             )
             .bind(&account_id)
             .bind(&table_name)
@@ -277,7 +277,7 @@ impl MetadataEngine for PostgresEngine {
         Box::pin(async move {
             Self::validate_account_id(&account_id)?;
             let (table_id,): (String,) = sqlx::query_as(
-                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2",
+                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2"
             )
             .bind(&account_id)
             .bind(&table_name)
@@ -323,7 +323,7 @@ impl MetadataEngine for PostgresEngine {
         Box::pin(async move {
             Self::validate_account_id(&account_id)?;
             let (table_id,): (String,) = sqlx::query_as(
-                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2",
+                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2"
             )
             .bind(&account_id)
             .bind(&table_name)
@@ -368,7 +368,7 @@ impl MetadataEngine for PostgresEngine {
         Box::pin(async move {
             Self::validate_account_id(&account_id)?;
             let (table_id,): (String,) = sqlx::query_as(
-                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2",
+                "SELECT table_id FROM tables WHERE account_id = $1 AND table_name = $2"
             )
             .bind(account_id)
             .bind(table_name)
