@@ -117,6 +117,18 @@ pub async fn handle_update_table<S: TableEngine>(
                         "One or more parameter values were invalid: KeySchema must not be empty for GSI creation".to_owned(),
                     ));
                 }
+                // Validate that all key attributes are defined in AttributeDefinitions
+                let attr_defs = input.attribute_definitions.as_deref().unwrap_or(&[]);
+                for ks in &create.key_schema {
+                    if !attr_defs.iter().any(|ad| ad.attribute_name == ks.attribute_name) {
+                        return Err(DynamoDbError::ValidationException(format!(
+                            "One or more parameter values were invalid: Some index key attributes are not defined in AttributeDefinitions. \
+                             Keys: [{}], AttributeDefinitions: [{}]",
+                            ks.attribute_name,
+                            attr_defs.iter().map(|ad| ad.attribute_name.as_str()).collect::<Vec<_>>().join(", ")
+                        )));
+                    }
+                }
             }
             if let Some(delete) = &update.delete {
                 extenddb_core::validation::validate_index_name(&delete.index_name)?;
@@ -141,9 +153,11 @@ pub async fn handle_update_table<S: TableEngine>(
                     other => crate::sanitize_storage_error(other),
                 })?;
             let current_tp = &current.provisioned_throughput;
+            let is_provisioned = current.billing_mode_summary.as_ref()
+                .map_or(true, |b| b.billing_mode == BillingMode::Provisioned);
             if current_tp.read_capacity_units == tp.read_capacity_units
                 && current_tp.write_capacity_units == tp.write_capacity_units
-                && current.billing_mode_summary.as_ref().is_some_and(|b| b.billing_mode == BillingMode::Provisioned)
+                && is_provisioned
             {
                 return Err(DynamoDbError::ValidationException(format!(
                     "The provisioned throughput for the table will not change. The requested value equals the current value. \
@@ -177,7 +191,7 @@ pub async fn handle_update_table<S: TableEngine>(
                 ))
             }
             extenddb_storage::error::StorageError::IndexNotFound(name) => {
-                DynamoDbError::ValidationException(format!(
+                DynamoDbError::ResourceNotFoundException(format!(
                     "One or more parameter values were invalid: Index not found: {name}"
                 ))
             }
