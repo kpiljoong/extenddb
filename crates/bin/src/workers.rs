@@ -23,8 +23,8 @@ use tracing_subscriber::{EnvFilter, reload};
 /// The combined filter is `{log_level},sqlx={sqlx_log_level}`.
 /// Falls back to `config_level` when `log_level` is absent from the DB.
 /// Runs until the process exits.
-pub(crate) async fn poll_log_level<S: SettingsStore>(
-    store: Arc<S>,
+pub(crate) async fn poll_log_level(
+    store: Arc<dyn SettingsStore>,
     handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
     config_level: String,
 ) {
@@ -96,8 +96,8 @@ pub(crate) async fn poll_log_level<S: SettingsStore>(
 /// Poll the `throttling_enabled` runtime setting and update the
 /// `ThrottleManager` when it changes. This allows enabling/disabling
 /// throttling at runtime via `extenddb settings set throttling_enabled true`.
-pub(crate) async fn poll_throttling_enabled<S: SettingsStore>(
-    store: Arc<S>,
+pub(crate) async fn poll_throttling_enabled(
+    store: Arc<dyn SettingsStore>,
     throttle: Arc<ThrottleManager>,
     config_enabled: bool,
 ) {
@@ -341,9 +341,9 @@ pub(crate) async fn metrics_prune_worker(metrics: Arc<extenddb_core::metrics::Me
 /// Drains data points older than 60 seconds, aggregates them into 1-minute
 /// buckets, and upserts via the `MetricsStore` trait. Also prunes DB rows
 /// older than 24 hours.
-pub(crate) async fn metrics_flush_worker<M: MetricsStore>(
+pub(crate) async fn metrics_flush_worker(
     metrics: Arc<extenddb_core::metrics::MetricsCollector>,
-    store: Arc<M>,
+    store: Arc<dyn MetricsStore>,
 ) {
     use extenddb_core::metrics::QuerySource;
     use extenddb_storage::management_store::MetricsRow;
@@ -410,7 +410,9 @@ pub(crate) async fn metrics_flush_worker<M: MetricsStore>(
 }
 
 /// Background worker that deletes old login attempt records.
-pub(crate) async fn login_attempt_cleanup_worker<R: RateLimitStore>(store: Arc<R>) {
+pub(crate) async fn login_attempt_cleanup_worker(
+    store: Arc<dyn RateLimitStore>,
+) {
     use std::time::Duration;
 
     const CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
@@ -426,8 +428,8 @@ pub(crate) async fn login_attempt_cleanup_worker<R: RateLimitStore>(store: Arc<R
 /// P119: Poll `gsi_propagation_delay_ms` from the settings table and update
 /// the cached `AtomicU64` in `PostgresEngine`. Runs every 30 seconds.
 /// On failure, retains the last known good value and logs a debug message.
-pub(crate) async fn poll_gsi_delay<S: SettingsStore>(
-    store: Arc<S>,
+pub(crate) async fn poll_gsi_delay(
+    store: Arc<dyn SettingsStore>,
     cached: Arc<std::sync::atomic::AtomicU64>,
 ) {
     use std::time::Duration;
