@@ -59,7 +59,7 @@ def wait_for_active(client, table_name: str, timeout: float = 60.0) -> None:
         resp = client.describe_table(TableName=table_name)
         if resp["Table"]["TableStatus"] == "ACTIVE":
             return
-        time.sleep(0.2)
+        time.sleep(0.02)
     raise TimeoutError(f"Table {table_name} did not become ACTIVE within {timeout}s")
 @pytest.fixture()
 def create_and_cleanup_table(dynamodb_client, unique_table_name):
@@ -108,5 +108,49 @@ def wait_for_deleted(client, table_name: str, timeout: float = 60.0) -> None:
             client.describe_table(TableName=table_name)
         except client.exceptions.ResourceNotFoundException:
             return
-        time.sleep(0.2)
+        time.sleep(0.02)
     raise TimeoutError(f"Table {table_name} was not deleted within {timeout}s")
+
+
+from contextlib import contextmanager
+from typing import Generator
+
+
+@contextmanager
+def scoped_table(
+    client,
+    attribute_definitions: list[dict] | None = None,
+    key_schema: list[dict] | None = None,
+    **extra_kwargs,
+) -> Generator[str, None, None]:
+    """Create a uniquely-named table, yield its name, delete on exit.
+
+    Use this in class/module-scoped fixtures to avoid repeating
+    create/wait/delete boilerplate:
+
+        @pytest.fixture(scope="class")
+        def my_table(dynamodb_client):
+            with scoped_table(dynamodb_client) as name:
+                yield name
+    """
+    name = f"extenddb-test-{uuid.uuid4().hex[:12]}"
+    create_kwargs: dict = {
+        "TableName": name,
+        "AttributeDefinitions": attribute_definitions or [
+            {"AttributeName": "pk", "AttributeType": "S"},
+        ],
+        "KeySchema": key_schema or [
+            {"AttributeName": "pk", "KeyType": "HASH"},
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    }
+    create_kwargs.update(extra_kwargs)
+    client.create_table(**create_kwargs)
+    wait_for_active(client, name)
+    try:
+        yield name
+    finally:
+        try:
+            client.delete_table(TableName=name)
+        except client.exceptions.ResourceNotFoundException:
+            pass  # Already deleted by the test itself.

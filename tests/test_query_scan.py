@@ -11,87 +11,79 @@ REQ-TEST-001, REQ-TEST-002, REQ-TEST-003
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from botocore.exceptions import ClientError
 
-from conftest import wait_for_active
-@pytest.fixture()
-def query_table(dynamodb_client, create_and_cleanup_table):
+from conftest import wait_for_active, scoped_table
+@pytest.fixture(scope="class")
+def query_table(dynamodb_client):
     """Create a hash+range (S,N) table with 10 items for query tests."""
-    name = f"extenddb-test-{uuid.uuid4().hex[:12]}"
-    create_and_cleanup_table(
-        name,
-        AttributeDefinitions=[
+    with scoped_table(
+        dynamodb_client,
+        attribute_definitions=[
             {"AttributeName": "pk", "AttributeType": "S"},
             {"AttributeName": "sk", "AttributeType": "N"},
         ],
-        KeySchema=[
+        key_schema=[
             {"AttributeName": "pk", "KeyType": "HASH"},
             {"AttributeName": "sk", "KeyType": "RANGE"},
         ],
-    )
-    wait_for_active(dynamodb_client, name)
-    for i in range(1, 11):
-        dynamodb_client.put_item(
-            TableName=name,
-            Item={
-                "pk": {"S": "user-1"},
-                "sk": {"N": str(i)},
-                "name": {"S": f"item-{i}"},
-                "age": {"N": str(20 + i)},
-            },
-        )
-    return name
-@pytest.fixture()
-def string_sk_table(dynamodb_client, create_and_cleanup_table):
+    ) as name:
+        for i in range(1, 11):
+            dynamodb_client.put_item(
+                TableName=name,
+                Item={
+                    "pk": {"S": "user-1"},
+                    "sk": {"N": str(i)},
+                    "name": {"S": f"item-{i}"},
+                    "age": {"N": str(20 + i)},
+                },
+            )
+        yield name
+@pytest.fixture(scope="class")
+def string_sk_table(dynamodb_client):
     """Create a hash+range (S,S) table with items for begins_with tests."""
-    name = f"extenddb-test-{uuid.uuid4().hex[:12]}"
-    create_and_cleanup_table(
-        name,
-        AttributeDefinitions=[
+    with scoped_table(
+        dynamodb_client,
+        attribute_definitions=[
             {"AttributeName": "pk", "AttributeType": "S"},
             {"AttributeName": "sk", "AttributeType": "S"},
         ],
-        KeySchema=[
+        key_schema=[
             {"AttributeName": "pk", "KeyType": "HASH"},
             {"AttributeName": "sk", "KeyType": "RANGE"},
         ],
-    )
-    wait_for_active(dynamodb_client, name)
-    items = ["alpha-1", "alpha-2", "beta-1", "gamma-1"]
-    for prefix in items:
-        dynamodb_client.put_item(
+    ) as name:
+        items = ["alpha-1", "alpha-2", "beta-1", "gamma-1"]
+        for prefix in items:
+            dynamodb_client.put_item(
+                TableName=name,
+                Item={"pk": {"S": "user-1"}, "sk": {"S": prefix}, "data": {"S": "v"}},
+            )
+        # Verify all items are visible before yielding to tests.
+        resp = dynamodb_client.query(
             TableName=name,
-            Item={"pk": {"S": "user-1"}, "sk": {"S": prefix}, "data": {"S": "v"}},
+            KeyConditionExpression="pk = :pk",
+            ExpressionAttributeValues={":pk": {"S": "user-1"}},
+            ConsistentRead=True,
         )
-    # Verify all items are visible before yielding to tests.
-    resp = dynamodb_client.query(
-        TableName=name,
-        KeyConditionExpression="pk = :pk",
-        ExpressionAttributeValues={":pk": {"S": "user-1"}},
-        ConsistentRead=True,
-    )
-    assert resp["Count"] == len(items), (
-        f"string_sk_table fixture: expected {len(items)} items, got {resp['Count']}"
-    )
-    return name
-@pytest.fixture()
-def scan_table(dynamodb_client, create_and_cleanup_table):
+        assert resp["Count"] == len(items), (
+            f"string_sk_table fixture: expected {len(items)} items, got {resp['Count']}"
+        )
+        yield name
+@pytest.fixture(scope="class")
+def scan_table(dynamodb_client):
     """Create a hash-only table with 13 items for scan tests."""
-    name = f"extenddb-test-{uuid.uuid4().hex[:12]}"
-    create_and_cleanup_table(name)
-    wait_for_active(dynamodb_client, name)
-    for i in range(1, 14):
-        dynamodb_client.put_item(
-            TableName=name,
-            Item={
-                "pk": {"S": f"item-{i:03d}"},
-                "category": {"S": "a" if i <= 3 else "b"},
-            },
-        )
-    return name
+    with scoped_table(dynamodb_client) as name:
+        for i in range(1, 14):
+            dynamodb_client.put_item(
+                TableName=name,
+                Item={
+                    "pk": {"S": f"item-{i:03d}"},
+                    "category": {"S": "a" if i <= 3 else "b"},
+                },
+            )
+        yield name
 class TestQuery:
     """Query operation tests."""
 

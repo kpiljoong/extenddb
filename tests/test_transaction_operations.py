@@ -11,13 +11,12 @@ from __future__ import annotations
 import pytest
 from botocore.exceptions import ClientError
 
-from conftest import wait_for_active
-@pytest.fixture()
-def hash_table(dynamodb_client, create_and_cleanup_table, unique_table_name):
-    """Create a hash-only table and wait for ACTIVE."""
-    create_and_cleanup_table(unique_table_name)
-    wait_for_active(dynamodb_client, unique_table_name)
-    return unique_table_name
+from conftest import wait_for_active, scoped_table
+@pytest.fixture(scope="module")
+def hash_table(dynamodb_client):
+    """Create a hash-only table for the module, delete on teardown."""
+    with scoped_table(dynamodb_client) as name:
+        yield name
 # ---------------------------------------------------------------------------
 # TransactWriteItems — happy paths
 # ---------------------------------------------------------------------------

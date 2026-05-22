@@ -9,52 +9,45 @@ REQ-TEST-001, REQ-TEST-002, REQ-TEST-003, REQ-TEST-004
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from botocore.exceptions import ClientError
 
-from conftest import wait_for_active
-@pytest.fixture()
-def hash_table(dynamodb_client, create_and_cleanup_table, unique_table_name):
-    """Create a hash-only table and wait for ACTIVE."""
-    create_and_cleanup_table(unique_table_name)
-    wait_for_active(dynamodb_client, unique_table_name)
-    return unique_table_name
-@pytest.fixture()
-def hash_range_table(dynamodb_client, create_and_cleanup_table):
-    """Create a hash+range (S,S) table and wait for ACTIVE."""
-    name = f"extenddb-test-{uuid.uuid4().hex[:12]}"
-    create_and_cleanup_table(
-        name,
-        AttributeDefinitions=[
+from conftest import wait_for_active, scoped_table
+@pytest.fixture(scope="class")
+def hash_table(dynamodb_client):
+    """Create a hash-only table for the class, delete on teardown."""
+    with scoped_table(dynamodb_client) as name:
+        yield name
+@pytest.fixture(scope="class")
+def hash_range_table(dynamodb_client):
+    """Create a hash+range (S,S) table for the class, delete on teardown."""
+    with scoped_table(
+        dynamodb_client,
+        attribute_definitions=[
             {"AttributeName": "pk", "AttributeType": "S"},
             {"AttributeName": "sk", "AttributeType": "S"},
         ],
-        KeySchema=[
+        key_schema=[
             {"AttributeName": "pk", "KeyType": "HASH"},
             {"AttributeName": "sk", "KeyType": "RANGE"},
         ],
-    )
-    wait_for_active(dynamodb_client, name)
-    return name
-@pytest.fixture()
-def hash_numeric_range_table(dynamodb_client, create_and_cleanup_table):
-    """Create a hash+range (S,N) table and wait for ACTIVE."""
-    name = f"extenddb-test-{uuid.uuid4().hex[:12]}"
-    create_and_cleanup_table(
-        name,
-        AttributeDefinitions=[
+    ) as name:
+        yield name
+@pytest.fixture(scope="class")
+def hash_numeric_range_table(dynamodb_client):
+    """Create a hash+range (S,N) table for the class, delete on teardown."""
+    with scoped_table(
+        dynamodb_client,
+        attribute_definitions=[
             {"AttributeName": "pk", "AttributeType": "S"},
             {"AttributeName": "sk", "AttributeType": "N"},
         ],
-        KeySchema=[
+        key_schema=[
             {"AttributeName": "pk", "KeyType": "HASH"},
             {"AttributeName": "sk", "KeyType": "RANGE"},
         ],
-    )
-    wait_for_active(dynamodb_client, name)
-    return name
+    ) as name:
+        yield name
 class TestPutItem:
     """PutItem operation tests."""
 
