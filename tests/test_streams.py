@@ -21,7 +21,7 @@ import uuid
 import boto3
 import pytest
 from botocore.exceptions import ClientError
-from conftest import wait_for_active, wait_for_deleted
+from conftest import _poll_interval, wait_for_active, wait_for_deleted
 # EXTENDDB_TEST_ENDPOINT is required — devtools/run-tests validates this.
 # Tests will fail with KeyError if the env var is missing.
 @pytest.fixture(scope="module")
@@ -128,7 +128,7 @@ def _wait_for_stream_records(
             matching = records
         if len(matching) >= min_count:
             return records
-        time.sleep(0.02)
+        time.sleep(_poll_interval())
     return records
 class TestListStreams:
     """ListStreams operation tests."""
@@ -210,7 +210,7 @@ class TestIteratorAdvancement:
                 shard_iters[sid] = resp.get("NextShardIterator")
             if len(first_pass_records) >= n:
                 break
-            time.sleep(0.02)
+            time.sleep(_poll_interval())
 
         assert len(first_pass_records) >= n
 
@@ -256,7 +256,7 @@ class TestIteratorAdvancement:
                 shard_iters[sid] = resp.get("NextShardIterator")
             if not any_records:
                 break
-            time.sleep(0.02)
+            time.sleep(_poll_interval())
 
         # Empty poll — should return 0 records and a valid NextShardIterator.
         for sid, it in shard_iters.items():
@@ -285,7 +285,7 @@ class TestIteratorAdvancement:
                 shard_iters[sid] = resp.get("NextShardIterator")
             if new_records:
                 break
-            time.sleep(0.02)
+            time.sleep(_poll_interval())
 
         assert len(new_records) == 1
         assert new_records[0]["dynamodb"]["Keys"]["pk"]["S"] == "empty-poll-test"
@@ -484,7 +484,7 @@ class TestIteratorTypes:
             pks = [r["dynamodb"]["Keys"]["pk"]["S"] for r in records]
             if "latest-after" in pks:
                 break
-            time.sleep(0.02)
+            time.sleep(_poll_interval())
 
         pks = [r["dynamodb"]["Keys"]["pk"]["S"] for r in records]
         assert "latest-after" in pks
@@ -607,7 +607,7 @@ class TestMixedWorkload:
             ]
             if len(our_records) >= 3:
                 break
-            time.sleep(0.02)
+            time.sleep(_poll_interval())
 
         events = [r["eventName"] for r in our_records]
         assert events == ["INSERT", "MODIFY", "REMOVE"], (
