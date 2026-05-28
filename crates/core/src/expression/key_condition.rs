@@ -777,6 +777,18 @@ mod tests {
     }
 
     #[test]
+    fn reverse_comparator_maps_each_operator_and_is_involutive() {
+        use CompareOp::{Eq, Ge, Gt, Le, Lt, Ne};
+
+        let cases = [(Eq, Eq), (Ne, Ne), (Lt, Gt), (Le, Ge), (Gt, Lt), (Ge, Le)];
+
+        for (op, reversed) in cases {
+            assert_eq!(reverse_comparator(op), reversed);
+            assert_eq!(reverse_comparator(reverse_comparator(op)), op);
+        }
+    }
+
+    #[test]
     fn resolve_multipart_reclassifies() {
         let tokens = tokenize("pk1 = :v1 AND pk2 = :v2 AND sk1 = :v3").unwrap();
         let mut kc = parse_key_condition(&tokens).unwrap();
